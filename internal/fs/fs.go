@@ -207,3 +207,27 @@ func (fs *FileSystem) getFullPath(user *config.User, path string) string {
 	path = strings.TrimPrefix(path, "/")
 	return filepath.Join(userRoot, path)
 }
+
+// GetFileSize gets the size of a file for a given user
+func (fs *FileSystem) GetFileSize(user *config.User, path string) (int64, error) {
+	// Check read permission
+	if err := auth.CheckPermission(user, fs.dataDir, path, auth.PermissionRead); err != nil {
+		return 0, err
+	}
+
+	// Get the actual filesystem path
+	fullPath := fs.getFullPath(user, path)
+
+	// Get file info
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return 0, err
+	}
+
+	// Return file size, or 0 if it's a directory
+	if info.IsDir() {
+		return 0, fmt.Errorf("path is a directory")
+	}
+
+	return info.Size(), nil
+}
