@@ -1,0 +1,56 @@
+# FTP-AIO Configuration Example
+# All fields are optional with sane defaults
+
+# Data directory (default: ./data)
+data: ./data
+
+# User configuration
+users:
+  admin:
+    pass: password123
+    uid: 1000
+    path: /               # relative to data dir
+    permissions: rw       # rw or ro
+  guest:
+    pass: guest123
+    uid: 1001
+    path: /public
+    permissions: ro
+
+# Service configuration (all disabled by default)
+services:
+  ftp:
+    enabled: true
+    port: 21
+  ftps:
+    enabled: false
+    port: 990
+    cert:                 # auto-generated if empty
+    key:                  # auto-generated if empty
+  sftp:
+    enabled: false
+    port: 22
+    host_key:             # auto-generated if empty
+  http:
+    enabled: false
+    port: 80
+    upload: true          # allow uploads
+    listing: true         # show directory listings
+  https:
+    enabled: false
+    port: 443
+    cert:                 # auto-generated if empty
+    key:                  # auto-generated if empty
+  tftp:
+    enabled: false
+    port: 69
+
+# Logging configuration
+logging:
+  level: info             # debug, info, warn, error
+  format: text            # text or json
+
+# TLS settings for auto-generated certificates
+tls:
+  hostname: localhost     # used for auto-generated certs
+  organization: FTP-AIO
