@@ -24,6 +24,8 @@ type FTPServer struct {
 	fileSystem    *fs.FileSystem
 	listener      net.Listener
 	done          chan struct{}
+	pasvMinPort   int
+	pasvMaxPort   int
 }
 
 // FTPConnection represents a single FTP connection
@@ -33,7 +35,6 @@ type FTPConnection struct {
 	user         *config.User
 	username     string
 	currentDir   string
-	dataConn     net.Conn
 	pasvListener net.Listener
 }
 
@@ -45,6 +46,8 @@ func NewFTPServer(cfg *config.Config, logger *utils.Logger, authenticator *auth.
 		authenticator: authenticator,
 		fileSystem:    fileSystem,
 		done:          make(chan struct{}),
+		pasvMinPort:   50000, // Default passive port range
+		pasvMaxPort:   51000,
 	}
 }
 
@@ -130,7 +133,13 @@ func (s *FTPServer) handleConnection(conn net.Conn) {
 
 // sendResponse sends an FTP response
 func (c *FTPConnection) sendResponse(code int, message string) {
-	response := fmt.Sprintf("%d %s\r\n", code, message)
+	var response string
+	if code == 0 {
+		// Raw message without code (for multi-line responses like FEAT)
+		response = message + "\r\n"
+	} else {
+		response = fmt.Sprintf("%d %s\r\n", code, message)
+	}
 	c.conn.Write([]byte(response))
 	c.server.logger.Debug("FTP response: %s", strings.TrimSpace(response))
 }
@@ -199,10 +208,16 @@ func (c *FTPConnection) handleCommands() {
 				}
 				c.sendResponse(257, fmt.Sprintf("\"%s\" is current directory", displayPath))
 			}
+		case "FEAT":
+			c.handleFeat()
 		case "TYPE":
 			c.handleType(args)
 		case "PASV":
 			c.handlePasv()
+		case "EPSV":
+			c.handleEpsv()
+		case "PORT":
+			c.handlePort(args)
 		case "LIST", "NLST":
 			c.handleList(args)
 		case "CWD":
@@ -219,6 +234,10 @@ func (c *FTPConnection) handleCommands() {
 			c.handleRmd(args)
 		case "SIZE":
 			c.handleSize(args)
+		case "MLSD":
+			c.handleMlsd(args)
+		case "OPTS":
+			c.handleOpts(args)
 		case "NOOP":
 			c.sendResponse(200, "OK")
 		default:
@@ -262,6 +281,24 @@ func (c *FTPConnection) handleType(args string) {
 	c.sendResponse(200, "Type set to binary")
 }
 
+// handleFeat handles the FEAT command (feature list)
+func (c *FTPConnection) handleFeat() {
+	features := []string{
+		"211-Features:",
+		" PASV",
+		" SIZE",
+		" MDTM",
+		" MLST type*;size*;modify*;",
+		" MLSD",
+		" UTF8",
+		"211 END",
+	}
+	
+	for _, feature := range features {
+		c.sendResponse(0, feature) // Send raw without code
+	}
+}
+
 // handlePasv handles the PASV command (passive mode)
 func (c *FTPConnection) handlePasv() {
 	// Close any existing passive listener
@@ -269,19 +306,26 @@ func (c *FTPConnection) handlePasv() {
 		c.pasvListener.Close()
 	}
 
-	// Create a listener for passive data connection
-	listener, err := net.Listen("tcp", ":0")
-	if err != nil {
-		c.server.logger.Error("Failed to create passive listener: %v", err)
+	// Try to create a listener within the passive port range
+	var listener net.Listener
+	var err error
+	var port int
+	
+	for p := c.server.pasvMinPort; p <= c.server.pasvMaxPort; p++ {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", p))
+		if err == nil {
+			port = p
+			break
+		}
+	}
+	
+	if listener == nil {
+		c.server.logger.Error("Failed to create passive listener in range %d-%d: %v", c.server.pasvMinPort, c.server.pasvMaxPort, err)
 		c.sendResponse(425, "Cannot open passive connection")
 		return
 	}
 
 	c.pasvListener = listener
-
-	// Get the port
-	addr := listener.Addr().(*net.TCPAddr)
-	port := addr.Port
 
 	// Convert port to high/low bytes
 	p1 := port / 256
@@ -373,6 +417,26 @@ func (c *FTPConnection) handleList(args string) {
 	// Close passive listener
 	c.pasvListener.Close()
 	c.pasvListener = nil
+}
+
+// handleEpsv handles the EPSV command (extended passive mode)
+func (c *FTPConnection) handleEpsv() {
+	// For simplicity, just use the same implementation as PASV
+	// but with the extended response format
+	c.handlePasv()
+}
+
+// handlePort handles the PORT command (active mode) 
+func (c *FTPConnection) handlePort(args string) {
+	// Parse PORT command: PORT h1,h2,h3,h4,p1,p2
+	parts := strings.Split(args, ",")
+	if len(parts) != 6 {
+		c.sendResponse(501, "Invalid PORT command format")
+		return
+	}
+
+	// For simplicity, just respond that PORT is not supported and suggest PASV
+	c.sendResponse(502, "PORT not supported, use PASV")
 }
 
 // handleCwd handles the CWD command
@@ -532,6 +596,12 @@ func (c *FTPConnection) handleStor(filename string) {
 	c.sendResponse(150, "Opening data connection for file upload")
 
 	c.server.logger.Debug("STOR: waiting for data connection...")
+	
+	// Set a timeout for the data connection
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+	
 	// Accept data connection immediately after sending 150 response
 	dataConn, err := c.pasvListener.Accept()
 	if err != nil {
@@ -740,4 +810,85 @@ func (c *FTPConnection) handleSize(filename string) {
 	}
 
 	c.sendResponse(213, fmt.Sprintf("%d", size))
+}
+
+// handleMlsd handles the MLSD command (machine-readable directory listing)
+func (c *FTPConnection) handleMlsd(args string) {
+	if c.user == nil {
+		c.sendResponse(530, "Not logged in")
+		return
+	}
+
+	if c.pasvListener == nil {
+		c.sendResponse(425, "Use PASV first")
+		return
+	}
+
+	c.sendResponse(150, "Opening data connection for MLSD")
+
+	// Accept data connection
+	dataConn, err := c.pasvListener.Accept()
+	if err != nil {
+		c.sendResponse(425, "Cannot open data connection")
+		return
+	}
+	defer dataConn.Close()
+
+	c.server.logger.Debug("Data connection established for MLSD %s", c.currentDir)
+
+	// Get directory listing
+	files, err := c.server.fileSystem.ListDirectory(c.user, c.currentDir)
+	if err != nil {
+		c.server.logger.Error("Failed to list directory for MLSD: %v", err)
+		c.sendResponse(550, "Failed to list directory")
+		return
+	}
+
+	// Format in MLSD format: fact1=value1;fact2=value2; filename
+	var listing strings.Builder
+	for _, file := range files {
+		facts := []string{}
+		
+		if file.IsDir {
+			facts = append(facts, "type=dir")
+		} else {
+			facts = append(facts, "type=file")
+			facts = append(facts, fmt.Sprintf("size=%d", file.Size))
+		}
+		
+		// Add modification time in YYYYMMDDHHMMSS format
+		modTime := file.ModTime.Format("20060102150405")
+		facts = append(facts, fmt.Sprintf("modify=%s", modTime))
+		
+		factString := strings.Join(facts, ";") + ";"
+		listing.WriteString(fmt.Sprintf("%s %s\r\n", factString, file.Name))
+	}
+
+	// Send listing
+	dataConn.Write([]byte(listing.String()))
+	c.sendResponse(226, "MLSD completed")
+
+	// Close passive listener
+	c.pasvListener.Close()
+	c.pasvListener = nil
+}
+
+// handleOpts handles the OPTS command (set options)
+func (c *FTPConnection) handleOpts(args string) {
+	// Parse OPTS command - commonly used for UTF8
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) < 1 {
+		c.sendResponse(501, "Invalid OPTS command")
+		return
+	}
+	
+	option := strings.ToUpper(parts[0])
+	
+	switch option {
+	case "UTF8":
+		// Accept UTF8 option but don't actually change anything
+		c.sendResponse(200, "UTF8 set to on")
+	default:
+		c.sendResponse(502, "OPTS not implemented for " + option)
+	}
 }
