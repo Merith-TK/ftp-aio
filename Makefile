@@ -29,7 +29,7 @@ install:
 
 # Development run with FTP enabled
 dev: build
-	./ftp-aio ./data --user="admin:password:1000:/:rw,guest:guest:1001:/public:ro" --ftp --log-level=debug
+	./ftp-aio ./data --user="admin:password:1000:/:rw,guest:guest:1001:/public:ro" --ftp --ftp-port=2121 --log-level=debug
 
 # Show help
 help:

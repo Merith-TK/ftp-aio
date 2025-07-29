@@ -46,8 +46,8 @@ func NewFTPServer(cfg *config.Config, logger *utils.Logger, authenticator *auth.
 		authenticator: authenticator,
 		fileSystem:    fileSystem,
 		done:          make(chan struct{}),
-		pasvMinPort:   50000, // Default passive port range
-		pasvMaxPort:   51000,
+		pasvMinPort:   2122, // Start just above the FTP control port
+		pasvMaxPort:   2132, // Small range for better firewall compatibility
 	}
 }
 
@@ -234,6 +234,8 @@ func (c *FTPConnection) handleCommands() {
 			c.handleRmd(args)
 		case "SIZE":
 			c.handleSize(args)
+		case "MDTM":
+			c.handleMdtm(args)
 		case "MLSD":
 			c.handleMlsd(args)
 		case "OPTS":
@@ -286,6 +288,7 @@ func (c *FTPConnection) handleFeat() {
 	features := []string{
 		"211-Features:",
 		" PASV",
+		" EPSV",
 		" SIZE",
 		" MDTM",
 		" MLST type*;size*;modify*;",
@@ -333,8 +336,23 @@ func (c *FTPConnection) handlePasv() {
 
 	c.server.logger.Debug("PASV: created listener on port %d (p1=%d, p2=%d)", port, p1, p2)
 
-	// Get local IP (simplified - use 127.0.0.1 for local testing)
-	c.sendResponse(227, fmt.Sprintf("Entering Passive Mode (127,0,0,1,%d,%d)", p1, p2))
+	// Get the local IP address from the control connection
+	localAddr := c.conn.LocalAddr().(*net.TCPAddr).IP
+	ip := localAddr.To4()
+	
+	c.server.logger.Debug("PASV: local address detected as %s", localAddr.String())
+	
+	// For local testing and many firewall scenarios, use 127.0.0.1
+	// In production, you'd want to configure the external IP
+	if ip == nil || localAddr.IsUnspecified() || localAddr.String() == "0.0.0.0" {
+		ip = net.IPv4(127, 0, 0, 1)
+		c.server.logger.Debug("PASV: using loopback IP for passive mode")
+	} else {
+		c.server.logger.Debug("PASV: using detected IP %s for passive mode", ip.String())
+	}
+
+	c.sendResponse(227, fmt.Sprintf("Entering Passive Mode (%d,%d,%d,%d,%d,%d)", 
+		ip[0], ip[1], ip[2], ip[3], p1, p2))
 }
 
 // handleList handles the LIST command
@@ -351,6 +369,12 @@ func (c *FTPConnection) handleList(args string) {
 
 	c.sendResponse(150, "Opening data connection for directory listing")
 
+	// Set timeout for passive listener
+	deadline := time.Now().Add(60 * time.Second)
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(deadline)
+	}
+
 	// Accept data connection
 	dataConn, err := c.pasvListener.Accept()
 	if err != nil {
@@ -359,7 +383,12 @@ func (c *FTPConnection) handleList(args string) {
 	}
 	defer dataConn.Close()
 
-	c.server.logger.Debug("Data connection established for LIST %s", c.currentDir)
+	// Clear listener deadline
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(time.Time{})
+	}
+
+	c.server.logger.Debug("Data connection established for LIST %s from %s", c.currentDir, dataConn.RemoteAddr())
 
 	// Get actual directory listing from file system
 	files, err := c.server.fileSystem.ListDirectory(c.user, c.currentDir)
@@ -421,9 +450,36 @@ func (c *FTPConnection) handleList(args string) {
 
 // handleEpsv handles the EPSV command (extended passive mode)
 func (c *FTPConnection) handleEpsv() {
-	// For simplicity, just use the same implementation as PASV
-	// but with the extended response format
-	c.handlePasv()
+	// Close any existing passive listener
+	if c.pasvListener != nil {
+		c.pasvListener.Close()
+	}
+
+	// Try to create a listener within the passive port range
+	var listener net.Listener
+	var err error
+	var port int
+	
+	for p := c.server.pasvMinPort; p <= c.server.pasvMaxPort; p++ {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", p))
+		if err == nil {
+			port = p
+			break
+		}
+	}
+	
+	if listener == nil {
+		c.server.logger.Error("Failed to create passive listener in range %d-%d: %v", c.server.pasvMinPort, c.server.pasvMaxPort, err)
+		c.sendResponse(425, "Cannot open passive connection")
+		return
+	}
+
+	c.pasvListener = listener
+
+	c.server.logger.Debug("EPSV: created listener on port %d", port)
+
+	// Extended passive mode response format: (|||port|)
+	c.sendResponse(229, fmt.Sprintf("Entering Extended Passive Mode (|||%d|)", port))
 }
 
 // handlePort handles the PORT command (active mode) 
@@ -525,7 +581,13 @@ func (c *FTPConnection) handleRetr(filename string) {
 
 	c.sendResponse(150, "Opening data connection for file transfer")
 
-	// Accept data connection immediately after sending 150 response
+	// Set timeout for passive listener
+	deadline := time.Now().Add(60 * time.Second)
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(deadline)
+	}
+
+	// Accept data connection
 	dataConn, err := c.pasvListener.Accept()
 	if err != nil {
 		c.server.logger.Error("Failed to accept data connection for RETR: %v", err)
@@ -534,7 +596,13 @@ func (c *FTPConnection) handleRetr(filename string) {
 	}
 	defer dataConn.Close()
 
-	c.server.logger.Debug("Data connection established for RETR %s", filePath)
+	// Clear listener deadline and set data connection timeout
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(time.Time{})
+	}
+	dataConn.SetDeadline(time.Now().Add(10 * time.Minute))
+
+	c.server.logger.Debug("Data connection established for RETR %s from %s", filePath, dataConn.RemoteAddr())
 
 	// Copy file content to data connection
 	bytesRead, err := io.Copy(dataConn, reader)
@@ -595,14 +663,15 @@ func (c *FTPConnection) handleStor(filename string) {
 	c.server.logger.Debug("STOR: permissions OK, sending 150 response")
 	c.sendResponse(150, "Opening data connection for file upload")
 
-	c.server.logger.Debug("STOR: waiting for data connection...")
+	c.server.logger.Debug("STOR: waiting for data connection on port range %d-%d...", c.server.pasvMinPort, c.server.pasvMaxPort)
 	
-	// Set a timeout for the data connection
+	// Set a reasonable timeout for the data connection (increased for GUI clients)
+	deadline := time.Now().Add(60 * time.Second)
 	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
-		tcpListener.SetDeadline(time.Now().Add(30 * time.Second))
+		tcpListener.SetDeadline(deadline)
 	}
 	
-	// Accept data connection immediately after sending 150 response
+	// Accept data connection
 	dataConn, err := c.pasvListener.Accept()
 	if err != nil {
 		c.server.logger.Error("Failed to accept data connection for STOR: %v", err)
@@ -615,7 +684,15 @@ func (c *FTPConnection) handleStor(filename string) {
 	}
 	defer dataConn.Close()
 
-	c.server.logger.Debug("Data connection established for STOR %s", filePath)
+	// Clear the deadline after successful accept and set data timeout
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(time.Time{})
+	}
+	
+	// Set timeout for data transfer
+	dataConn.SetDeadline(time.Now().Add(10 * time.Minute))
+
+	c.server.logger.Debug("Data connection established for STOR %s from %s", filePath, dataConn.RemoteAddr())
 
 	// Create the file writer
 	writer, err := c.server.fileSystem.WriteFile(c.user, filePath)
@@ -826,6 +903,12 @@ func (c *FTPConnection) handleMlsd(args string) {
 
 	c.sendResponse(150, "Opening data connection for MLSD")
 
+	// Set timeout for passive listener
+	deadline := time.Now().Add(60 * time.Second)
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(deadline)
+	}
+
 	// Accept data connection
 	dataConn, err := c.pasvListener.Accept()
 	if err != nil {
@@ -834,7 +917,12 @@ func (c *FTPConnection) handleMlsd(args string) {
 	}
 	defer dataConn.Close()
 
-	c.server.logger.Debug("Data connection established for MLSD %s", c.currentDir)
+	// Clear listener deadline
+	if tcpListener, ok := c.pasvListener.(*net.TCPListener); ok {
+		tcpListener.SetDeadline(time.Time{})
+	}
+
+	c.server.logger.Debug("Data connection established for MLSD %s from %s", c.currentDir, dataConn.RemoteAddr())
 
 	// Get directory listing
 	files, err := c.server.fileSystem.ListDirectory(c.user, c.currentDir)
@@ -891,4 +979,49 @@ func (c *FTPConnection) handleOpts(args string) {
 	default:
 		c.sendResponse(502, "OPTS not implemented for " + option)
 	}
+}
+
+// handleMdtm handles the MDTM command (file modification time)
+func (c *FTPConnection) handleMdtm(filename string) {
+	if c.user == nil {
+		c.sendResponse(530, "Not logged in")
+		return
+	}
+
+	if filename == "" {
+		c.sendResponse(501, "No filename given")
+		return
+	}
+
+	// Get the file path
+	filePath := filename
+	if !strings.HasPrefix(filePath, "/") {
+		if c.currentDir == "/" {
+			filePath = "/" + filename
+		} else {
+			filePath = c.currentDir + "/" + filename
+		}
+	}
+
+	// Normalize the path to handle .. and . properly
+	filePath = c.normalizePath(filePath)
+
+	// Check read permission
+	if err := auth.CheckPermission(c.user, c.server.config.Data, filePath, auth.PermissionRead); err != nil {
+		c.server.logger.Debug("MDTM permission denied for user %s to file %s: %v", c.username, filePath, err)
+		c.sendResponse(550, "Permission denied")
+		return
+	}
+
+	// Get file information
+	fileInfo, err := c.server.fileSystem.GetFileInfo(c.user, filePath)
+	if err != nil {
+		c.server.logger.Debug("MDTM failed to get file info for %s: %v", filePath, err)
+		c.sendResponse(550, "File not found")
+		return
+	}
+
+	// Format time as YYYYMMDDHHMMSS (UTC)
+	modTime := fileInfo.ModTime.UTC().Format("20060102150405")
+	c.sendResponse(213, modTime)
 }

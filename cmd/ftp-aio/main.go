@@ -47,7 +47,7 @@ var rootCmd = &cobra.Command{
 	Long: `A dead simple, all-in-one file transfer server supporting multiple protocols.
 	
 Examples:
-  ftp-aio ./data --user="admin:pass:1000:/:/rw" --ftp
+  ftp-aio ./data --user="admin:pass:1000:/:rw" --ftp
   ftp-aio ./data --user="user:pass:1000:/folder:rw,guest:guest:1001:/public:ro" --ftp --http
   ftp-aio --config=config.yml`,
 	Args: cobra.MaximumNArgs(1),
