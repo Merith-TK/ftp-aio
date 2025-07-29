@@ -95,7 +95,13 @@ func (m *Manager) createServers() error {
 		m.servers = append(m.servers, server)
 	}
 
-	// TODO: Add other servers (FTPS, SFTP, HTTP, HTTPS, TFTP) in future phases
+	// TFTP Server
+	if m.config.Services.TFTP.Enabled {
+		server := NewTFTPServer(m.config, m.logger, m.authenticator, m.fileSystem)
+		m.servers = append(m.servers, server)
+	}
+
+	// TODO: Add other servers (FTPS, SFTP, HTTP, HTTPS) in future phases
 
 	if len(m.servers) == 0 {
 		return fmt.Errorf("no servers enabled")
