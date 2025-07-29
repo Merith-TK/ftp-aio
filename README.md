@@ -24,7 +24,7 @@ This project creates a single binary that serves multiple file transfer protocol
 ### Dead Simple CLI
 ```bash
 # Start FTP server with one user
-ftp-aio ./data --user="admin:password:1000:/:/rw" --ftp
+ftp-aio ./data --user="admin:password:1000:/:rw" --ftp
 
 # Multiple protocols with custom ports
 ftp-aio ./data \
@@ -34,13 +34,13 @@ ftp-aio ./data \
   --http --http-port=8080
 
 # HTTPS with auto-generated certificates
-ftp-aio ./data --user="admin:pass:1000:/:/rw" --https --https-port=8443
+ftp-aio ./data --user="admin:pass:1000:/:rw" --https --https-port=8443
 ```
 
 ### Environment Variables
 ```bash
 export AIO_DATA="./data"
-export AIO_USERS="admin:password:1000:/:/rw"
+export AIO_USERS="admin:password:1000:/:rw"
 export AIO_FTP="true"
 export AIO_FTP_PORT="2121"
 export AIO_SFTP="true" 
@@ -142,7 +142,7 @@ AIO_FTP_PORT=2121
 AIO_SFTP=true
 AIO_SFTP_PORT=2222
 AIO_DATA="./data"
-AIO_USERS="admin:password:1000:/:/rw"
+AIO_USERS="admin:password:1000:/:rw"
 AIO_LOG_LEVEL=info
 ```
 
@@ -257,7 +257,7 @@ cd ftp-aio
 go build -o ftp-aio cmd/ftp-aio/main.go
 
 # Run with FTP and HTTP
-./ftp-aio ./data --user="admin:secret:1000:/:/rw" --ftp --http --http-port=8080
+./ftp-aio ./data --user="admin:secret:1000:/:rw" --ftp --http --http-port=8080
 
 # Use config file
 ./ftp-aio --config=config.yml

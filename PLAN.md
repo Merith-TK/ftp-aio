@@ -29,7 +29,7 @@ Create a dead simple, all-in-one file transfer server supporting multiple protoc
 ### Simple CLI Usage
 ```bash
 # Start FTP server on default port (21) with one user
-ftp-aio ./data --user="admin:password:1000:/:/rw" --ftp
+ftp-aio ./data --user="admin:password:1000:/:rw" --ftp
 
 # Multiple protocols with custom ports
 ftp-aio ./data \
@@ -337,9 +337,9 @@ username:password:uid:path:permissions
 
 Examples:
 ```bash
---user="admin:secret:1000:/:/rw"
+--user="admin:secret:1000:/:rw"
 --user="guest:guest123:1001:/public:ro"
---user="admin:pass:1000:/:/rw,guest:guest:1001:/public:ro"
+--user="admin:pass:1000:/:rw,guest:guest:1001:/public:ro"
 ```
 
 ## Configuration Schema (Simplified)
